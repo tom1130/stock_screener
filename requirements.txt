@@ -1,0 +1,8 @@
+pykrx>=1.0.35
+streamlit>=1.35.0
+pandas>=2.0.0
+plotly>=5.17.0
+numpy>=1.26.0
+requests>=2.28.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
