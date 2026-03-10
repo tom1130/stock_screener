@@ -70,7 +70,9 @@ def enrich_with_investor(
     df: pd.DataFrame,
     investor_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """기관/외국인 순매수 컬럼을 df에 추가(또는 덮어쓰기)."""
+    """기관/외국인 순매수 컬럼을 df에 추가(또는 덮어쓰기).
+    거래량_hist도 '거래량' 컬럼으로 추가해 N일 평균 계산에 활용.
+    """
     if investor_df.empty:
         df["기관순매수_억"] = np.nan
         df["외국인순매수_억"] = np.nan
@@ -78,6 +80,9 @@ def enrich_with_investor(
     for col in ["기관순매수_억", "외국인순매수_억"]:
         if col in investor_df.columns:
             df[col] = investor_df[col].reindex(df.index)
+    # 거래량_hist → 거래량 (enrich_with_hist_volume_avg에서 today_vol로 사용)
+    if "거래량_hist" in investor_df.columns:
+        df["거래량"] = investor_df["거래량_hist"].reindex(df.index)
     return df
 
 
@@ -126,6 +131,54 @@ def enrich_with_hist_volume(
         if listed is not None:
             today_turn = (today_vol / listed.replace(0, np.nan) * SHARE_TO_PCT)
             avg_turn = (avg_vol / listed.replace(0, np.nan) * SHARE_TO_PCT)
+            df[f"{n}일평균대비회전율"] = calc_vs_avg_ratio(today_turn, avg_turn)
+        else:
+            df[f"{n}일평균대비회전율"] = np.nan
+
+    return df
+
+
+def enrich_with_hist_volume_avg(
+    df: pd.DataFrame,
+    avg_vol_df: pd.DataFrame,
+    compare_days: list[int],
+) -> pd.DataFrame:
+    """
+    avg_vol_df를 사용해 N일 평균 대비 배수 계산.
+
+    avg_vol_df: 인덱스=ticker, 컬럼: '5일평균거래량','10일평균거래량','20일평균거래량'
+                및 선택적으로 '오늘거래량' 포함.
+    """
+    today_price = df["종가"] if "종가" in df.columns else pd.Series(np.nan, index=df.index)
+    listed = pd.to_numeric(df["상장주식수"], errors="coerce") if "상장주식수" in df.columns else None
+
+    for n in compare_days:
+        avg_col = f"{n}일평균거래량"
+        if avg_vol_df.empty or avg_col not in avg_vol_df.columns:
+            df[f"{n}일평균대비거래대금"] = np.nan
+            df[f"{n}일평균대비회전율"] = np.nan
+            continue
+
+        avg_vol = avg_vol_df[avg_col].reindex(df.index)
+
+        # 오늘 거래량: avg_vol_df에 '오늘거래량' 컬럼이 있으면 우선 사용
+        if not avg_vol_df.empty and "오늘거래량" in avg_vol_df.columns:
+            today_vol = avg_vol_df["오늘거래량"].reindex(df.index)
+        elif "거래량" in df.columns:
+            today_vol = pd.to_numeric(df["거래량"], errors="coerce")
+        else:
+            today_vol = pd.Series(np.nan, index=df.index)
+
+        price_aligned = today_price.reindex(df.index)
+        today_val = today_vol * price_aligned
+        avg_val = avg_vol * price_aligned
+
+        df[f"{n}일평균대비거래대금"] = calc_vs_avg_ratio(today_val, avg_val)
+
+        if listed is not None:
+            listed_aligned = listed.reindex(df.index).replace(0, np.nan)
+            today_turn = today_vol / listed_aligned * SHARE_TO_PCT
+            avg_turn = avg_vol / listed_aligned * SHARE_TO_PCT
             df[f"{n}일평균대비회전율"] = calc_vs_avg_ratio(today_turn, avg_turn)
         else:
             df[f"{n}일평균대비회전율"] = np.nan

@@ -9,21 +9,22 @@ import pandas as pd
 from config import COMPARE_DAYS
 from data.fetcher import (
     fetch_market_cap, fetch_etf_tickers,
-    fetch_investor_for_tickers, fetch_hist_data_for_tickers,
+    fetch_all_data_for_tickers,
+    fetch_hist_volume_avg,
     get_latest_business_date,
 )
 from core.metrics import (
     build_metrics_dataframe,
     enrich_with_investor,
-    enrich_with_hist_volume,
+    enrich_with_hist_volume_avg,
 )
 from core.screener import apply_filters
 from ui.filters import render_sidebar_filters
 from ui.stock_list import render_stock_list
 from ui.stock_detail import render_stock_detail
 
-# 결과 임계값: 이 이하면 자동으로 상세 데이터 로드
-_AUTO_ENRICH_LIMIT = 300
+# 종목 수 임계값: 이 초과 시 사용자 확인 버튼 표시
+_CONFIRM_THRESHOLD = 500
 
 
 def main():
@@ -36,10 +37,12 @@ def main():
         st.session_state.enriched_df = None
     if "last_filter_hash" not in st.session_state:
         st.session_state.last_filter_hash = None
+    if "enrich_confirmed" not in st.session_state:
+        st.session_state.enrich_confirmed = False
 
-    conditions = render_sidebar_filters()
+    conditions, date_str = render_sidebar_filters()
 
-    # ── 1단계: 기본 데이터 로드 ─────────────────────────────────────────────
+    # ── 1단계: 기본 시세 데이터 로드 (Naver sise, 항상 오늘) ─────────────────
     with st.spinner("시세 데이터 로딩 중…"):
         base_df = _load_base_data(conditions.market)
 
@@ -56,43 +59,40 @@ def main():
     # 기본 필터 적용 (투자자·N일 제외)
     pre_filtered = apply_filters(base_df, conditions)
 
-    # ── 2단계: 상세 데이터 (투자자 + N일 거래량) ────────────────────────────
-    filter_hash = _make_hash(conditions, len(pre_filtered))
+    # ── 2단계: 상세 데이터 (투자자 + N일 거래량) ─────────────────────────────
+    filter_hash = _make_hash(conditions, date_str, len(pre_filtered))
 
-    need_enrich = (
-        (conditions.institution_net_min is not None)
-        or (conditions.foreigner_net_min is not None)
-        or any(v for v in conditions.value_vs_avg_min.values() if v)
-        or any(v for v in conditions.turnover_vs_avg_min.values() if v)
-        or conditions.require_inst_and_fore
-        or len(pre_filtered) <= _AUTO_ENRICH_LIMIT
-    )
-
+    # 필터 조건 변경 시 캐시 초기화
     if st.session_state.last_filter_hash != filter_hash:
         st.session_state.enriched_df = None
         st.session_state.last_filter_hash = filter_hash
+        st.session_state.enrich_confirmed = False
 
     enriched_df = st.session_state.enriched_df
 
-    if need_enrich and enriched_df is None:
+    if enriched_df is None:
         tickers = pre_filtered.index.tolist()
-        if len(tickers) > 0:
-            prog = st.progress(0, text=f"투자자·N일 데이터 로딩 중… ({len(tickers)}종목)")
-            price_map = pre_filtered["종가"].dropna().to_dict()
+        n_tickers = len(tickers)
 
-            investor_df = fetch_investor_for_tickers(tickers, price_map)
-            prog.progress(50, text="N일 거래량 계산 중…")
-
-            hist_data = fetch_hist_data_for_tickers(tickers)
-            prog.progress(90, text="메트릭 계산 중…")
-
-            enriched = enrich_with_investor(pre_filtered.copy(), investor_df)
-            enriched = enrich_with_hist_volume(enriched, hist_data, COMPARE_DAYS)
-            prog.progress(100)
-            prog.empty()
-
-            st.session_state.enriched_df = enriched
-            enriched_df = enriched
+        if n_tickers == 0:
+            pass  # 종목 없음, enrichment 불필요
+        elif n_tickers > _CONFIRM_THRESHOLD:
+            # 사용자 확인 버튼 표시
+            st.warning(
+                f"기본 필터 결과가 **{n_tickers}개** 종목입니다. "
+                f"투자자·N일 데이터를 로드하면 시간이 걸릴 수 있습니다."
+            )
+            if st.session_state.enrich_confirmed:
+                enriched_df = _run_enrichment(pre_filtered, tickers, date_str)
+                st.session_state.enriched_df = enriched_df
+            else:
+                if st.button(f"투자자·N일 데이터 로드 ({n_tickers}종목)"):
+                    st.session_state.enrich_confirmed = True
+                    st.rerun()
+        else:
+            # 500개 이하: 자동 로드
+            enriched_df = _run_enrichment(pre_filtered, tickers, date_str)
+            st.session_state.enriched_df = enriched_df
 
     if enriched_df is not None:
         filtered_df = apply_filters(enriched_df, conditions)
@@ -116,18 +116,42 @@ def main():
             st.rerun()
 
 
+def _run_enrichment(pre_filtered: pd.DataFrame, tickers: list[str], date_str: str) -> pd.DataFrame:
+    """투자자·N일 데이터를 로드하고 enrich된 DataFrame 반환."""
+    n_tickers = len(tickers)
+    prog = st.progress(0, text=f"투자자 데이터 로딩 중… ({n_tickers}종목)")
+
+    investor_df = fetch_all_data_for_tickers(tickers, date_str=date_str)
+    prog.progress(50, text="N일 평균 거래량 계산 중…")
+
+    avg_vol_df = fetch_hist_volume_avg(tickers, date_str=date_str, compare_days=COMPARE_DAYS)
+    prog.progress(90, text="메트릭 계산 중…")
+
+    enriched = enrich_with_investor(pre_filtered.copy(), investor_df)
+    enriched = enrich_with_hist_volume_avg(enriched, avg_vol_df, COMPARE_DAYS)
+
+    prog.progress(100)
+    prog.empty()
+    return enriched
+
+
 _ETF_PREFIXES = (
     "KODEX", "TIGER", "ARIRANG", "KINDEX", "HANARO", "KOSEF",
     "SOL", "ACE", "TIMEFOLIO", "PLUS", "TREX", "FOCUS",
     "GIANT", "KTOP", "MASTER", "WOORI", "SMART ETF",
+    "RISE", "TIME ", "WON ", "KB", "NH-Amundi",
 )
+
+_ETF_KEYWORDS = ("ETN", "레버리지", "인버스", " ETF")
 
 
 def _is_etf_by_name(name_series: pd.Series) -> pd.Series:
-    """종목명이 ETF 접두어로 시작하면 True."""
+    """종목명이 ETF/ETN 접두어로 시작하거나 키워드를 포함하면 True."""
     mask = pd.Series(False, index=name_series.index)
     for prefix in _ETF_PREFIXES:
         mask |= name_series.str.startswith(prefix, na=False)
+    for kw in _ETF_KEYWORDS:
+        mask |= name_series.str.contains(kw, na=False, regex=False)
     return mask
 
 
@@ -150,7 +174,7 @@ def _load_base_data(market: str) -> pd.DataFrame:
     )
 
 
-def _make_hash(conditions, n_tickers: int) -> str:
+def _make_hash(conditions, date_str: str, n_tickers: int) -> str:
     import hashlib, json
     d = {
         "market": conditions.market,
@@ -161,6 +185,7 @@ def _make_hash(conditions, n_tickers: int) -> str:
         "chg_min": conditions.change_rate_min,
         "chg_max": conditions.change_rate_max,
         "exclude_etf": conditions.exclude_etf,
+        "date_str": date_str,
         "n": n_tickers,
     }
     return hashlib.md5(json.dumps(d, sort_keys=True).encode()).hexdigest()

@@ -1,12 +1,38 @@
 """사이드바 필터 위젯"""
 from __future__ import annotations
+import datetime
 import streamlit as st
 from config import MARKETS, MARKET_CAP_TIERS, COMPARE_DAYS
 from core.screener import FilterConditions
 
 
-def render_sidebar_filters() -> FilterConditions:
+def _get_latest_business_date() -> datetime.date:
+    """오늘 기준 가장 최근 영업일(토→금, 일→금) 반환."""
+    today = datetime.date.today()
+    weekday = today.weekday()  # 0=월 … 6=일
+    if weekday == 5:  # 토
+        return today - datetime.timedelta(days=1)
+    if weekday == 6:  # 일
+        return today - datetime.timedelta(days=2)
+    return today
+
+
+def render_sidebar_filters() -> tuple[FilterConditions, str]:
     st.sidebar.header("🔍 필터 설정")
+
+    # 0. 날짜 선택
+    st.sidebar.subheader("📅 기준 날짜")
+    default_date = _get_latest_business_date()
+    selected_date = st.sidebar.date_input(
+        "투자자·N일 데이터 기준일",
+        value=default_date,
+        max_value=datetime.date.today(),
+        key="selected_date",
+    )
+    st.sidebar.caption(
+        "Naver sise는 오늘 실시간만 / 투자자·N일은 선택 날짜 기준"
+    )
+    date_str = selected_date.strftime("%Y%m%d")
 
     # 1. 시장
     st.sidebar.subheader("시장")
@@ -97,4 +123,4 @@ def render_sidebar_filters() -> FilterConditions:
         institution_net_min=inst_min, foreigner_net_min=fore_min, individual_net_min=indi_min,
         require_inst_and_fore=require_both,
         sort_col=sort_col, sort_asc=sort_asc,
-    )
+    ), date_str
