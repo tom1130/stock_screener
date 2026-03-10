@@ -53,6 +53,9 @@ class FilterConditions:
     # 기관 & 외국인 동시 순매수 조건
     require_inst_and_fore: bool = False
 
+    # ETF 제외
+    exclude_etf: bool = True
+
     # 정렬 기준
     sort_col: str = "시총대비거래대금"
     sort_asc: bool = False

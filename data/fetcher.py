@@ -241,6 +241,127 @@ def _latest_biz_impl() -> str:
 get_latest_business_date = _make_cached(_latest_biz_impl, ttl=3600, show_spinner=False)
 
 
+# ── ETF 목록 ──────────────────────────────────────────────────────────────────
+
+def _fetch_etf_tickers_impl() -> set:
+    """Naver API에서 ETF 종목코드 set 반환."""
+    try:
+        r = requests.get(
+            "https://finance.naver.com/api/sise/etfItemList.nhn",
+            headers=_HEADERS, timeout=10,
+        )
+        if not r.ok:
+            return set()
+        items = r.json().get("result", {}).get("etfItemList", [])
+        return {item["itemcode"] for item in items}
+    except Exception:
+        return set()
+
+
+fetch_etf_tickers = _make_cached(_fetch_etf_tickers_impl, ttl=86400, show_spinner=False)
+
+
+# ── 투자자별 순매수 (frgn.naver) ──────────────────────────────────────────────
+
+def _fetch_frgn_page(ticker: str) -> dict:
+    """frgn.naver에서 기관/외국인 순매매량(주) 반환."""
+    _nan = {"ticker": ticker, "inst_vol": float("nan"), "fore_vol": float("nan")}
+    try:
+        r = requests.get(
+            "https://finance.naver.com/item/frgn.naver",
+            params={"code": ticker}, headers=_HEADERS, timeout=10,
+        )
+        r.encoding = "euc-kr"
+        from io import StringIO as _SIO
+        tables = pd.read_html(_SIO(r.text), encoding="euc-kr")
+        # '기관' 및 '외국인' 컬럼이 있는 테이블을 자동 탐색
+        t = None
+        for tbl in tables:
+            cols_str = str(tbl.columns.tolist())
+            if "기관" in cols_str and "외국인" in cols_str and "날짜" in cols_str:
+                t = tbl
+                break
+        if t is None:
+            return _nan
+        # 첫 번째 유효 데이터 행 (NaN 헤더 제외)
+        data_rows = t.dropna(subset=[t.columns[0]])
+        if data_rows.empty:
+            return _nan
+        row = data_rows.iloc[0]
+        inst = row[("기관", "순매매량")]
+        fore = row[("외국인", "순매매량")]
+        return {
+            "ticker": ticker,
+            "inst_vol": float(inst) if pd.notna(inst) else float("nan"),
+            "fore_vol": float(fore) if pd.notna(fore) else float("nan"),
+        }
+    except Exception:
+        return _nan
+
+
+def fetch_investor_for_tickers(
+    tickers: list[str], price_map: dict[str, float]
+) -> pd.DataFrame:
+    """
+    기관/외국인 순매수를 억원으로 반환.
+    price_map: {ticker: 종가(원)}
+    반환: DataFrame(인덱스=ticker, 컬럼=[기관순매수_억, 외국인순매수_억])
+    """
+    results = []
+    with ThreadPoolExecutor(max_workers=20) as exc:
+        futures = {exc.submit(_fetch_frgn_page, t): t for t in tickers}
+        for fut in as_completed(futures):
+            results.append(fut.result())
+
+    df = pd.DataFrame(results).set_index("ticker")
+    df["inst_vol"] = pd.to_numeric(df["inst_vol"], errors="coerce")
+    df["fore_vol"] = pd.to_numeric(df["fore_vol"], errors="coerce")
+
+    prices = pd.Series(price_map).reindex(df.index)
+    df["기관순매수_억"] = (df["inst_vol"] * prices / 1e8).round(1)
+    df["외국인순매수_억"] = (df["fore_vol"] * prices / 1e8).round(1)
+
+    return df[["기관순매수_억", "외국인순매수_억"]]
+
+
+# ── 개별 종목 일별 거래량 (sise_day.naver) ────────────────────────────────────
+
+def _fetch_sise_day(ticker: str) -> pd.DataFrame:
+    """sise_day.naver에서 최근 ~30일 일별 거래량/종가 반환."""
+    try:
+        r = requests.get(
+            "https://finance.naver.com/item/sise_day.naver",
+            params={"code": ticker, "page": "1"}, headers=_HEADERS, timeout=10,
+        )
+        r.encoding = "euc-kr"
+        from io import StringIO as _SIO
+        t = pd.read_html(_SIO(r.text), encoding="euc-kr")[0].dropna(subset=["날짜"])
+        t["거래량"] = pd.to_numeric(t["거래량"], errors="coerce")
+        t["종가"] = pd.to_numeric(t["종가"], errors="coerce")
+        return t[["날짜", "거래량", "종가"]].dropna(subset=["거래량"])
+    except Exception:
+        return pd.DataFrame()
+
+
+def fetch_hist_data_for_tickers(tickers: list[str]) -> dict[str, pd.DataFrame]:
+    """
+    각 ticker의 최근 일별 데이터를 병렬로 가져온다.
+    반환: {ticker: DataFrame(날짜, 거래량, 종가)}
+    """
+    result: dict[str, pd.DataFrame] = {}
+
+    def _one(ticker):
+        return ticker, _fetch_sise_day(ticker)
+
+    with ThreadPoolExecutor(max_workers=20) as exc:
+        futures = {exc.submit(_one, t): t for t in tickers}
+        for fut in as_completed(futures):
+            ticker, df = fut.result()
+            result[ticker] = df
+
+    return result
+
+
 # ── 개별 종목 (차트용) ────────────────────────────────────────────────────────
 
 def _ticker_ohlcv_impl(ticker: str, start: str, end: str) -> pd.DataFrame:

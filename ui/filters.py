@@ -1,24 +1,19 @@
 """사이드바 필터 위젯"""
 from __future__ import annotations
-import datetime as dt_mod
 import streamlit as st
 from config import MARKETS, MARKET_CAP_TIERS, COMPARE_DAYS
 from core.screener import FilterConditions
-from data.fetcher import get_latest_business_date
 
-def render_sidebar_filters() -> tuple[FilterConditions, str]:
+
+def render_sidebar_filters() -> FilterConditions:
     st.sidebar.header("🔍 필터 설정")
 
-    # 1. 기준일
-    st.sidebar.subheader("기준일")
-    latest = get_latest_business_date()
-    default_dt = dt_mod.datetime.strptime(latest, "%Y%m%d").date()
-    selected_date = st.sidebar.date_input("조회 날짜", value=default_dt)
-    date_str = selected_date.strftime("%Y%m%d")
-
-    # 2. 시장
+    # 1. 시장
     st.sidebar.subheader("시장")
     market = st.sidebar.selectbox("시장 선택", MARKETS, index=0)
+
+    # 2. ETF 제외
+    exclude_etf = st.sidebar.checkbox("ETF 제외", value=True)
 
     # 3. 시가총액 (필수)
     st.sidebar.subheader("📊 시가총액 (필수)")
@@ -58,6 +53,7 @@ def render_sidebar_filters() -> tuple[FilterConditions, str]:
 
     # 7. N일 평균 대비 배수
     st.sidebar.subheader("📅 N일 평균 대비 배수")
+    st.sidebar.caption("⚠️ 설정 시 종목별 일별 데이터를 추가 로드합니다")
     value_vs_avg: dict = {}
     turnover_vs_avg: dict = {}
     for n in COMPARE_DAYS:
@@ -71,6 +67,7 @@ def render_sidebar_filters() -> tuple[FilterConditions, str]:
 
     # 8. 투자자
     st.sidebar.subheader("👥 투자자 순매수 (억원)")
+    st.sidebar.caption("⚠️ 설정 시 종목별 투자자 데이터를 추가 로드합니다")
     inst_min_raw = st.sidebar.number_input("기관 순매수 최소", value=0.0, step=10.0, key="inst_min")
     fore_min_raw = st.sidebar.number_input("외국인 순매수 최소", value=0.0, step=10.0, key="fore_min")
     indi_min_raw = st.sidebar.number_input("개인 순매수 최소", value=0.0, step=10.0, key="indi_min")
@@ -91,6 +88,7 @@ def render_sidebar_filters() -> tuple[FilterConditions, str]:
 
     return FilterConditions(
         market=market,
+        exclude_etf=exclude_etf,
         market_cap_min=cap_min, market_cap_max=cap_max,
         price_min=price_min, price_max=price_max,
         change_rate_min=chg_min, change_rate_max=chg_max,
@@ -99,4 +97,4 @@ def render_sidebar_filters() -> tuple[FilterConditions, str]:
         institution_net_min=inst_min, foreigner_net_min=fore_min, individual_net_min=indi_min,
         require_inst_and_fore=require_both,
         sort_col=sort_col, sort_asc=sort_asc,
-    ), date_str
+    )

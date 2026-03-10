@@ -66,6 +66,73 @@ def calc_n_day_avg(
 
 # ── 메인 DataFrame 조립 ───────────────────────────────────────────────────────
 
+def enrich_with_investor(
+    df: pd.DataFrame,
+    investor_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """기관/외국인 순매수 컬럼을 df에 추가(또는 덮어쓰기)."""
+    if investor_df.empty:
+        df["기관순매수_억"] = np.nan
+        df["외국인순매수_억"] = np.nan
+        return df
+    for col in ["기관순매수_억", "외국인순매수_억"]:
+        if col in investor_df.columns:
+            df[col] = investor_df[col].reindex(df.index)
+    return df
+
+
+def enrich_with_hist_volume(
+    df: pd.DataFrame,
+    hist_data: dict[str, pd.DataFrame],
+    compare_days: list[int],
+) -> pd.DataFrame:
+    """
+    hist_data: {ticker: DataFrame(날짜, 거래량, 종가)} — sise_day.naver 결과.
+    hist_data의 iloc[0]이 오늘, iloc[1:]이 과거.
+    N일 평균 대비 거래대금·회전율 배수를 df에 추가.
+    """
+    today_price = df["종가"] if "종가" in df.columns else pd.Series(dtype=float, index=df.index)
+
+    # hist_data에서 오늘 거래량 추출
+    today_vol_dict = {}
+    for ticker, hdf in hist_data.items():
+        if not hdf.empty:
+            v = pd.to_numeric(hdf.iloc[0]["거래량"], errors="coerce")
+            today_vol_dict[ticker] = v
+    today_vol = pd.Series(today_vol_dict).reindex(df.index)
+
+    # 상장주식수 (회전율용)
+    listed = pd.to_numeric(df["상장주식수"], errors="coerce") if "상장주식수" in df.columns else None
+
+    for n in compare_days:
+        avg_vol_dict = {}
+        for ticker, hdf in hist_data.items():
+            if hdf.empty:
+                continue
+            past = hdf.iloc[1:n + 1]  # iloc[0] = 오늘 제외
+            if past.empty:
+                continue
+            v = pd.to_numeric(past["거래량"], errors="coerce")
+            avg_vol_dict[ticker] = v.mean()
+
+        avg_vol = pd.Series(avg_vol_dict).reindex(df.index)
+
+        # 거래대금 = 거래량 × 종가
+        today_val = today_vol * today_price.reindex(df.index)
+        avg_val = avg_vol * today_price.reindex(df.index)
+
+        df[f"{n}일평균대비거래대금"] = calc_vs_avg_ratio(today_val, avg_val)
+
+        if listed is not None:
+            today_turn = (today_vol / listed.replace(0, np.nan) * SHARE_TO_PCT)
+            avg_turn = (avg_vol / listed.replace(0, np.nan) * SHARE_TO_PCT)
+            df[f"{n}일평균대비회전율"] = calc_vs_avg_ratio(today_turn, avg_turn)
+        else:
+            df[f"{n}일평균대비회전율"] = np.nan
+
+    return df
+
+
 def build_metrics_dataframe(
     today_cap_df: pd.DataFrame,
     today_ohlcv_df: pd.DataFrame,
@@ -162,7 +229,7 @@ def build_metrics_dataframe(
     df.index.name = "ticker"
     output_cols = [
         "종목명", "market", "종가", "등락률",
-        "시가총액_억", "거래대금_억",
+        "시가총액_억", "거래대금_억", "상장주식수",
         "시총대비거래대금", "주식수회전율",
         "기관순매수_억", "외국인순매수_억", "개인순매수_억",
         "5일평균대비거래대금", "10일평균대비거래대금", "20일평균대비거래대금",
